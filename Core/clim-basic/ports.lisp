@@ -76,8 +76,13 @@
                         :reader port-text-style-mappings)
    (pointer-sheet :initform nil :accessor port-pointer-sheet
 		  :documentation "The sheet the pointer is over, if any")
+   ;; A difference between grabbed-sheet and pressed-sheet is that the
+   ;; former takes all pointer events while pressed-sheet receives
+   ;; replicated pointer motion events. -- jd 2019-08-21
    (grabbed-sheet :initform nil :accessor port-grabbed-sheet
-		  :documentation "The sheet the pointer is grabbing, if any")))
+		  :documentation "The sheet the pointer is grabbing, if any")
+   (pressed-sheet :initform nil :accessor port-pressed-sheet
+		  :documentation "The sheet the pointer is pressed on, if any")))
 
 (defmethod port-keyboard-input-focus (port)
   (when (null *application-frame*)
@@ -171,107 +176,119 @@
   (with-slots (properties) port
     (setf (getf properties indicator) value)))
 
-(defmethod distribute-event ((port basic-port) event)
-  (dispatch-event (event-sheet event) event))
+;;; This function determines the sheet to which pointer should be
+;;; delivered. The right thing is not obvious:
+;;;
+;;; - we may assume that event-sheet is set correctly by port
+;;; - we may find the innermost sheet's child and deliver to it
+;;; - we may deliver event to sheet's graft and let it dispatch
+;;;
+;;; Third option would require a default handle-event method to call
+;;; handle-event on its child under the cursor. Such top-down approach
+;;; is appealing if we consider that scrolling pane could filter mouse
+;;; wheel buttons without gross handle-event :around hacks. For now we
+;;; implement the second option with the innermost child. In general
+;;; case we need z-ordering for both strategies. -- jd 2019-08-21
+(defun get-pointer-event-sheet (event &aux (sheet (event-sheet event)))
+  (get-pointer-position (sheet event)
+    (loop
+       for child = (child-containing-position sheet x y)
+       do
+         (when (null child)
+           (return sheet))
+         (multiple-value-setq (x y)
+           (untransform-position (sheet-transformation child) x y))
+         (setf sheet child))))
 
-;;; This method is responsible for synthetising leave/enter events for
-;;; sheets which are not mirrored. Also when the sheet is grabbed we
-;;; redirect events there. This makes "almost compatible" behavior for
-;;; ports which do not implement grabbing *and* works well for sheets
-;;; which are not mirrored. -- jd 2019-08-09
-(defmethod distribute-event :around ((port basic-port) (event pointer-event))
-  (when-let ((sheet (port-grabbed-sheet port)))
-    (unless (typep event '(or pointer-enter-event pointer-exit-event))
-      (if (eq sheet (event-sheet event))
-          (dispatch-event sheet event)
-          (let ((new-event (shallow-copy-object event)))
-            (get-pointer-position (sheet event)
-              (setf (slot-value new-event 'x) x
-                    (slot-value new-event 'y) y
-                    (slot-value new-event 'sheet) sheet))
-            (change-class new-event 'pointer-motion-event)
-            (dispatch-event sheet new-event))))
-    (return-from distribute-event))
+;;; Function is responsible for making a copy of an immutable event
+;;; and adjusting its coordinates to be in the target-sheet
+;;; coordinates. Optionally it may change event's class.
+(defun dispatch-event-copy (target-sheet event &optional new-class
+                            &aux (sheet (event-sheet event)))
+  (if (eql target-sheet sheet)
+      (dispatch-event sheet event)
+      (let ((new-event (shallow-copy-object event)))
+        (get-pointer-position (target-sheet new-event)
+          (setf (slot-value new-event 'x) x
+                (slot-value new-event 'y) y
+                (slot-value new-event 'sheet) target-sheet))
+        (when new-class
+          (change-class new-event new-class))
+        (dispatch-event target-sheet new-event))))
+
+;;; This function assumes that get-pointer-event-sheet returns the
+;;; innermost child under the pointer. See the comment above.
+(defun synthetize-enter-exit-events
+    (old-pointer-sheet new-pointer-sheet event)
   (flet ((sheet-common-ancestor (sheet-a sheet-b)
            (loop
               (cond ((or (null sheet-a) (null sheet-b))
                      (return-from sheet-common-ancestor nil))
                     ((sheet-ancestor-p sheet-b sheet-a)
                      (return-from sheet-common-ancestor sheet-a))
-                    (t (setf sheet-a (sheet-parent sheet-a))))))
-         (get-pointer-event-sheet (sheet event)
-           (get-pointer-position (sheet event)
-             (loop
-                ;; only not mirrored child?
-                for child = (child-containing-position sheet x y)
-                do
-                  (when (null child)
-                    (return sheet))
-                  (multiple-value-setq (x y)
-                    (untransform-position (sheet-transformation child) x y))
-                  (setf sheet child))))
-         (distribute-enter-events (sheet-b sheet-t event)
-           (dolist (s
-                     (do ((s sheet-b (sheet-parent s))
-                          (lis nil))
-                         ((or (null s) (graftp s) (eq s sheet-t)) lis)
-                       (push s lis)))
-             (let ((new-event (shallow-copy-object event)))
-               (get-pointer-position (s event)
-                 (setf (slot-value new-event 'x) x
-                       (slot-value new-event 'y) y
-                       (slot-value new-event 'sheet) s))
-               (change-class new-event 'pointer-enter-event)
-               (dispatch-event s new-event))))
-         (distribute-exit-events (sheet-b sheet-t event)
-           (when (and sheet-t sheet-b)
-             (do ((s sheet-b (sheet-parent s)))
-                 ((or (null s) (graftp s) (eq s sheet-t)))
-               (let ((new-event (shallow-copy-object event)))
-                 (get-pointer-position (s event)
-                   (setf (slot-value new-event 'x) x
-                         (slot-value new-event 'y) y
-                         (slot-value new-event 'sheet) s))
-                 (change-class new-event 'pointer-exit-event)
-                 (dispatch-event s new-event))))))
-    (let* ((pointer-sheet (get-pointer-event-sheet (event-sheet event) event))
-           (old-pointer-sheet (or (port-pointer-sheet port) (event-sheet event)))
-           (common-sheet (sheet-common-ancestor old-pointer-sheet pointer-sheet)))
-      (distribute-exit-events old-pointer-sheet common-sheet event)
-      (distribute-enter-events pointer-sheet common-sheet event)
-      (setf (port-pointer-sheet port) pointer-sheet)
-      ;; set the pointer cursor
-      (when pointer-sheet
-        (let ((pointer-cursor (sheet-pointer-cursor pointer-sheet)))
-	  (unless (eql (port-lookup-current-pointer-cursor port (event-sheet event))
-		       pointer-cursor)
-	    (set-sheet-pointer-cursor port (event-sheet event) pointer-cursor))))))
-  ;; Do not send the event twice.
-  (unless (typep event '(or pointer-enter-event pointer-exit-event))
-    (call-next-method)))
+                    (t (setf sheet-a (sheet-parent sheet-a)))))))
+    (let ((common-ancestor (sheet-common-ancestor old-pointer-sheet
+                                                  new-pointer-sheet)))
+      ;; distribute exit events (innermost first)
+      (when (and common-ancestor old-pointer-sheet)
+        (do ((s old-pointer-sheet (sheet-parent s)))
+            ((or (null s) (graftp s) (eq s common-ancestor)))
+          (dispatch-event-copy s event 'pointer-exit-event)))
+      ;; distribute enter events (innermost last)
+      (dolist (s (do ((s new-pointer-sheet (sheet-parent s))
+                      (lis nil))
+                     ((or (null s) (graftp s) (eq s common-ancestor)) lis)
+                   (push s lis)))
+        (dispatch-event-copy s event 'pointer-enter-event)))))
 
-;;; This method is necessary to distribute events for sheets which do
-;;; not have a mirror. In this case we find the innermost sheet at
-;;; event's position and dispatch event's shallow copy to this
-;;; sheet. -- jd 2019-08-05
+(defmethod distribute-event ((port basic-port) event)
+  (dispatch-event (event-sheet event) event))
+
+;;; In the most general case we can't tell whenever all sheets are
+;;; mirrored or not. So a default method for pointer-events operates
+;;; under the assumption that we must deliver events to sheets which
+;;; doesn't have a mirror and that the sheet grabbing and pressing is
+;;; not implemented by the port (we emulate it). -- jd 2019-08-21
 (defmethod distribute-event ((port basic-port) (event pointer-event))
-  (when-let ((sheet (port-pointer-sheet port)))
-    (if (eq sheet (event-sheet event))
-        (call-next-method)
-        ;; events are immutable (explicitly stated in the spec) - that's why we
-        ;; need to make an event copy for single-mirrored sheets - event-sheet
-        ;; is not the same as sheet we want to distribute event to.
-        (let ((new-event (shallow-copy-object event)))
-          (setf (slot-value new-event 'sheet) sheet)
-          (unless (eq (sheet-mirrored-ancestor sheet)
-                      (sheet-mirrored-ancestor (event-sheet event)))
-            (multiple-value-bind (cx cy)
-                (untransform-position (sheet-delta-transformation (sheet-mirrored-ancestor sheet) nil)
-                                      (slot-value new-event 'graft-x)
-                                      (slot-value new-event 'graft-y))
-              (setf (slot-value new-event 'x) cx
-                    (slot-value new-event 'y) cy)))
-          (dispatch-event sheet new-event)))))
+  ;; When we receive pointer event we need to take into account
+  ;; unmirrored sheets and grabbed/pressed sheets.
+  ;;
+  ;; - Grabbed sheet steals all pointer events (non-local exit)
+  ;; - Pressed sheet receives replicated motion events
+  ;; - Pressing/releasing the button assigns pressed-sheet
+  ;; - Pointer motion may result in synthetized boundary events
+  ;; - Events are delivered to the innermost child of the sheet
+  (let ((grabbed-sheet (port-grabbed-sheet port))
+        (pressed-sheet (port-pressed-sheet port))
+        (old-pointer-sheet (port-pointer-sheet port))
+        (new-pointer-sheet (get-pointer-event-sheet event)))
+    (when grabbed-sheet
+      (unless (typep event '(or pointer-enter-event pointer-exit-event))
+        (dispatch-event-copy grabbed-sheet event))
+      (return-from distribute-event))
+    ;; Synthetize boundary change events and update the port.
+    (synthetize-enter-exit-events old-pointer-sheet new-pointer-sheet event)
+    (setf (port-pointer-sheet port) new-pointer-sheet)
+    ;; Set the pointer cursor.
+    (when-let ((cursor-sheet (or pressed-sheet new-pointer-sheet)))
+      (let ((old-pointer-cursor (port-lookup-current-pointer-cursor port (event-sheet event)))
+            (new-pointer-cursor (sheet-pointer-cursor new-pointer-sheet)))
+	(unless (eql old-pointer-cursor new-pointer-cursor)
+	  (set-sheet-pointer-cursor port (event-sheet event) new-pointer-cursor))))
+    ;; Maybe-update the pressed sheet.
+    (cond
+      ((and (typep event 'pointer-button-press-event)
+            (null pressed-sheet))
+       (setf (port-pressed-sheet port) new-pointer-sheet))
+      ((and (typep event 'pointer-button-release-event)
+            (not (null pressed-sheet)))
+       (setf (port-pressed-sheet port) nil))
+      ((and (typep event 'pointer-motion-event)
+            (not (null pressed-sheet))
+            (not (eql pressed-sheet new-pointer-sheet)))
+       (dispatch-event-copy pressed-sheet event)))
+    ;; Distribute event to the innermost child.
+    (dispatch-event-copy new-pointer-sheet event)))
 
 (defmacro with-port-locked ((port) &body body)
   (let ((fn (gensym "CONT.")))
