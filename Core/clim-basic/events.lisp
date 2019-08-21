@@ -130,17 +130,16 @@
    (graft-y :reader pointer-event-native-graft-y) ))
 
 (defmacro get-pointer-position ((sheet event) &body body)
-   (with-gensyms (event-var sheet-var x-var y-var)
+   (with-gensyms (event-var sheet-var)
      `(let* ((,sheet-var ,sheet)
-	     (,event-var ,event)
-	     (,x-var (device-event-native-x ,event-var))
-	     (,y-var (device-event-native-y ,event-var)))
+	     (,event-var ,event))
 	(multiple-value-bind (x y)
 	    (if ,sheet-var
-		(untransform-position (sheet-native-transformation ,sheet-var)
-				      ,x-var
-				      ,y-var)
-		(values ,x-var ,y-var))
+		(untransform-position (sheet-delta-transformation ,sheet-var (graft ,sheet-var))
+                                      (device-event-native-graft-x ,event-var)
+                                      (device-event-native-graft-y ,event-var))
+		(values (device-event-native-x ,event-var)
+                        (device-event-native-y ,event-var)))
 	  (declare (ignorable x y))
 	  ,@body))))
 
