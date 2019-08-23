@@ -1995,7 +1995,6 @@
    #:port-disable-sheet
    #:port-enable-sheet
    #:port-force-output
-   #:port-frame-keyboard-input-focus
    #:port-grab-pointer
    #:port-ungrab-pointer
    #:with-pointer-grabbed

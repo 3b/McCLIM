@@ -74,6 +74,9 @@
     :accessor port-lock)
    (text-style-mappings :initform (make-hash-table :test #'eq)
                         :reader port-text-style-mappings)
+   (focused-sheet :initform nil :accessor port-keyboard-input-focus
+                                :accessor port-focused-sheet
+		  :documentation "The sheet the keyboard events are passed to.")
    (pointer-sheet :initform nil :accessor port-pointer-sheet
 		  :documentation "The sheet the pointer is over, if any")
    ;; A difference between grabbed-sheet and pressed-sheet is that the
@@ -84,28 +87,20 @@
    (pressed-sheet :initform nil :accessor port-pressed-sheet
 		  :documentation "The sheet the pointer is pressed on, if any")))
 
-(defmethod port-keyboard-input-focus (port)
-  (when (null *application-frame*)
-    (error "~S called with null ~S" 
-           'port-keyboard-input-focus '*application-frame*))
-  (port-frame-keyboard-input-focus port *application-frame*))
+(defgeneric note-input-focus-changed (sheet state)
+  (:documentation "Called when a sheet receives or loses the keyboard
+input focus. This is a McCLIM extension.")
+  (:method (sheet state)
+    (declare (ignore sheet state))))
 
-(defmethod (setf port-keyboard-input-focus) (focus port)
-  (when (null *application-frame*)
-    (error "~S called with null ~S" 
-           '(setf port-keyboard-input-focus) '*application-frame*))
-  ;; XXX: pane frame is not defined for all streams (for instance not for
-  ;; CLIM:STANDARD-EXTENDED-INPUT-STREAM), so this sanity check would lead to
-  ;; error on that.
-  ;; XXX: also should we allow reading objects from foreign application frames?
-  ;; This was the case on Genera and is requested by users from time to time...
-  #+ (or)
-  (unless (eq *application-frame* (pane-frame focus))
-    (error "frame mismatch in ~S" '(setf port-keyboard-input-focus)))
-  (setf (port-frame-keyboard-input-focus port *application-frame*) focus))
-
-(defgeneric port-frame-keyboard-input-focus (port frame))
-(defgeneric (setf port-frame-keyboard-input-focus) (focus port frame))
+(defmethod (setf port-keyboard-input-focus) :around (focus port)
+  (let ((old-focus (port-keyboard-input-focus port))
+        (result (call-next-method))     ; clim-null cheats
+        (new-focus (port-keyboard-input-focus port)))
+    (prog1 result
+      (unless (eq old-focus new-focus)
+        (note-input-focus-changed old-focus nil)
+        (note-input-focus-changed new-focus t)))))
 
 (defun find-port (&key (server-path *default-server-path*))
   (if (null server-path)
@@ -247,15 +242,17 @@
 ;;; In the most general case we can't tell whenever all sheets are
 ;;; mirrored or not. So a default method for pointer-events operates
 ;;; under the assumption that we must deliver events to sheets which
-;;; doesn't have a mirror and that the sheet grabbing and pressing is
-;;; not implemented by the port (we emulate it). -- jd 2019-08-21
+;;; doesn't have a mirror and that the sheet grabbing, pressing and
+;;; input focusing is implemented locally. -- jd 2019-08-21
 (defmethod distribute-event ((port basic-port) (event pointer-event))
   ;; When we receive pointer event we need to take into account
   ;; unmirrored sheets and grabbed/pressed sheets.
   ;;
   ;; - Grabbed sheet steals all pointer events (non-local exit)
   ;; - Pressed sheet receives replicated motion events
+  ;; - Focused sheet receives keyboard events
   ;; - Pressing/releasing the button assigns pressed-sheet
+  ;; - Pressing the button changes focused-sheet
   ;; - Pointer motion may result in synthetized boundary events
   ;; - Events are delivered to the innermost child of the sheet
   (let ((grabbed-sheet (port-grabbed-sheet port))
@@ -275,20 +272,32 @@
             (new-pointer-cursor (sheet-pointer-cursor new-pointer-sheet)))
 	(unless (eql old-pointer-cursor new-pointer-cursor)
 	  (set-sheet-pointer-cursor port (event-sheet event) new-pointer-cursor))))
-    ;; Maybe-update the pressed sheet.
-    (cond
-      ((and (typep event 'pointer-button-press-event)
-            (null pressed-sheet))
-       (setf (port-pressed-sheet port) new-pointer-sheet))
-      ((and (typep event 'pointer-button-release-event)
-            (not (null pressed-sheet)))
-       (setf (port-pressed-sheet port) nil))
-      ((and (typep event 'pointer-motion-event)
-            (not (null pressed-sheet))
-            (not (eql pressed-sheet new-pointer-sheet)))
-       (dispatch-event-copy pressed-sheet event)))
+    ;; Pressing pointer button over a sheet makes a sheet pressed and
+    ;; focused. Releasing the button sets the presed sheet to NIL (but
+    ;; focus remains). Unless pressed sheet is already a target of the
+    ;; motion event, event is duplicated and dispatched to it.
+    (typecase event
+      (pointer-button-press-event
+       (when (null pressed-sheet)
+         (setf (port-pressed-sheet port) new-pointer-sheet))
+       (setf (port-focused-sheet port) new-pointer-sheet))
+      (pointer-button-release-event
+       (when pressed-sheet
+         (setf (port-pressed-sheet port) nil)))
+      (pointer-motion-event
+       (when (and pressed-sheet (not (eql pressed-sheet new-pointer-sheet)))
+         (dispatch-event-copy pressed-sheet event))))
     ;; Distribute event to the innermost child.
     (dispatch-event-copy new-pointer-sheet event)))
+
+(defmethod distribute-event ((port basic-port) (event keyboard-event))
+  (if-let ((focused (port-keyboard-input-focus port)))
+    (dispatch-event-copy focused event)
+    (let ((sheet (event-sheet event)))
+      ;; SETF the focus to avoid further changes when we hover the
+      ;; pointer over different sheet.
+      (setf (port-keyboard-input-focus port) sheet)
+      (dispatch-event sheet event))))
 
 (defmacro with-port-locked ((port) &body body)
   (let ((fn (gensym "CONT.")))
