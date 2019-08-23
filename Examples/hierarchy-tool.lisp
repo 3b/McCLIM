@@ -17,10 +17,19 @@
                                          (make-rectangle* (+ x1 10) (+ y1 10)
                                                           (- x2 10) (- y2 10))))
       (draw-rectangle* pane x1 y1 x2 y2 :filled nil)
-      (draw-circle* pane (/ (- x2 x1) 2) (/ (- y2 y1) 2) 15
+      (let ((cx (/ (- x2 x1) 2))
+            (cy (/ (- y2 y1) 2)))
+        (draw-circle* pane cx cy 15
+                      :ink (if (slot-value pane 'state)
+                               clim:+yellow+
+                               clim:+blue+))
+        (draw-text* pane (format nil "~a" (slot-value pane 'kchar))
+                    cx cy :align-x :center :align-y :center
                     :ink (if (slot-value pane 'state)
-                             clim:+yellow+
-                             clim:+blue+))
+                             clim:+blue+
+                             clim:+yellow+)
+                    :text-size :large
+                    :text-face :bold))
       (draw-text* pane
                   name
                   (+ x1 10) (+ y1 10) :align-y :top))))
@@ -33,6 +42,7 @@
 
 (defclass layout-protocol-gadget (clim:basic-gadget)
   ((state :initform nil)
+   (kchar :initform "X")
    (repaint-function :initarg :repaint-function :initform (error "no repaint function"))))
 
 (defclass layout-protocol-gadget* (layout-protocol-gadget)
@@ -48,6 +58,11 @@
 (defmethod handle-event ((sheet layout-protocol-gadget) (event pointer-exit-event))
   (setf (slot-value sheet 'state) nil)
   (handle-repaint sheet +everywhere+))
+
+(defmethod handle-event ((sheet layout-protocol-gadget) (event key-press-event))
+  (alexandria:when-let ((ch (keyboard-event-character event)))
+    (setf (slot-value sheet 'kchar) ch)
+    (handle-repaint sheet +everywhere+)))
 
 (defparameter *panes* (make-hash-table :test #'equalp))
 (defparameter *rpanes* (make-hash-table :test #'equalp))
