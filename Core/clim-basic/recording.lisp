@@ -379,7 +379,8 @@ recording stream. If it is T, *STANDARD-OUTPUT* is used.")
                           (bounding-rectangle record)
                           (region-difference (bounding-rectangle record)
                                              (make-rectangle* (1+ x1) (1+ y1) (1- x2) (1- y2))))
-                      :ink +foreground-ink+)))
+                      :ink +foreground-ink+)
+         (medium-finish-output (sheet-medium stream))))
       (:unhighlight
        (repaint-sheet stream (bounding-rectangle record))
        ;; Using queue-repaint should be faster in apps (such as clouseau) that
