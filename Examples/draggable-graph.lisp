@@ -50,7 +50,8 @@
           (alexandria:hash-table-values (slot-value node 'climi::edges-to))))
 
 (defun node-and-edges-region (node edges)
-  (stupid-copy-rectangle (reduce #'region-union edges :initial-value node)))
+  (climi::rounded-bounding-rectangle
+   (stupid-copy-rectangle (reduce #'region-union edges :initial-value node))))
 
 (defun redisplay-edges (graph edges)
   (dolist (edge edges)
@@ -85,10 +86,10 @@
                                     (declare (ignore old-x old-y))
                                     (ecase mode
                                       (:erase
-                                       (erase-output-record record stream)
-                                       (map nil #'clear-output-record edge-records)
                                        (setf erase-region
-                                             (node-and-edges-region record edge-records)))
+                                             (node-and-edges-region record edge-records))
+                                       (erase-output-record record stream)
+                                       (map nil #'clear-output-record edge-records))
                                       (:draw
                                        (setf (output-record-position record)
                                              (values (- x offset-x) (- y offset-y)))
