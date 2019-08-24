@@ -85,10 +85,10 @@
                                     (declare (ignore old-x old-y))
                                     (ecase mode
                                       (:erase
-                                       (erase-output-record record stream)
-                                       (map nil #'clear-output-record edge-records)
                                        (setf erase-region
-                                             (node-and-edges-region record edge-records)))
+                                             (node-and-edges-region record edge-records))
+                                       (erase-output-record record stream)
+                                       (map nil #'clear-output-record edge-records))
                                       (:draw
                                        (setf (output-record-position record)
                                              (values (- x offset-x) (- y offset-y)))
