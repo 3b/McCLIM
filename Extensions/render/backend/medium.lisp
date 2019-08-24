@@ -3,6 +3,22 @@
 (defclass render-medium-mixin (basic-medium climb:multiline-text-medium-mixin)
   ())
 
+(defmethod climi::graphics-state-line-style-border :around
+    (graphics (medium render-medium-mixin))
+  (let ((b (call-next-method)))
+    (ceiling b)))
+
+(defmethod climi::medium-device-region :around ((medium render-medium-mixin))
+  (with-bounding-rectangle* (x1 y1 x2 y2) (call-next-method)
+    (let ((w (- x2 x1))
+          (h (- y2 y1))
+          (rx (round x1))
+          (ry (round y1)))
+      (make-rectangle* rx ry
+                       (+ rx (round w))
+                       (+ ry (round h))))))
+
+
 (defun %medium-stroke-paths (medium paths)
   (alexandria:when-let* ((msheet (sheet-mirrored-ancestor (medium-sheet medium)))
                          (mirror (sheet-mirror msheet))
